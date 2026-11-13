@@ -31,6 +31,10 @@ app:
   cancel-window-minutes: ${CANCEL_WINDOW_MINUTES:30}
   # 监管问询函要求的法定答复期限（工作日）
   legal-deadline-workdays: 15
+  # 挂起仲裁：到期前多少天生成法务复核待办；挂起超过多少天且无新依据自动升级
+  hold:
+    review-lead-days: ${HOLD_REVIEW_LEAD_DAYS:3}
+    legal-limit-days: ${HOLD_LEGAL_LIMIT_DAYS:180}
   evidence:
     dir: ${EVIDENCE_DIR:./evidence}
 

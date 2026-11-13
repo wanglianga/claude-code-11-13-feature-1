@@ -36,6 +36,7 @@ public class WorkOrderService {
     private final LineageService lineage;
     private final AuditService audit;
     private final ObjectMapper objectMapper;
+    private final HoldService holds;
 
     @Value("${app.cancel-window-minutes:30}")
     private long cancelWindowMinutes;
@@ -47,11 +48,12 @@ public class WorkOrderService {
     private String evidenceDir;
 
     public WorkOrderService(NamedParameterJdbcTemplate jdbc, LineageService lineage,
-                            AuditService audit, ObjectMapper objectMapper) {
+                            AuditService audit, ObjectMapper objectMapper, HoldService holds) {
         this.jdbc = jdbc;
         this.lineage = lineage;
         this.audit = audit;
         this.objectMapper = objectMapper;
+        this.holds = holds;
     }
 
     public record CreateTicketRequest(String subjectHash, String channel, String sourceRef) {
@@ -159,6 +161,7 @@ public class WorkOrderService {
             SELECT id, actor, action, detail_json, created_at
             FROM compliance.audit_log WHERE ticket_id = :id ORDER BY id
             """, new MapSqlParameterSource("id", ticketId)));
+        ticket.put("holdView", holds.ticketHoldView(ticketId));
         return ticket;
     }
 
@@ -401,6 +404,15 @@ public class WorkOrderService {
             throw ApiException.conflict("当前状态 " + status + " 不允许执行删除作业");
         }
         String subjectHash = (String) ticket.get("subjectHash");
+        // 台账优先：独立事务预扫描（行锁+逐位置核对），撞挂起时 HELD 在独立事务中固化提交
+        Map<String, Object> blockedLocation = holds.checkExecutionBlocked(ticketId);
+        if (blockedLocation != null) {
+            audit.log(ticketId, principal.getName(), "DELETE_BLOCKED_BY_HOLD_LEDGER", blockedLocation);
+            throw ApiException.conflict("位置 " + blockedLocation.get("assetCode") + "/" + blockedLocation.get("locationRef")
+                + " 存在有效挂起依据，台账优先：本次删除作业拒绝执行，工单转 HELD");
+        }
+        // 预扫描通过后再锁行：并发的挂起登记会在同一行锁上等待，无法在本事务中途插入新挂起
+        holds.lockTicketForExecution(ticketId);
         jdbc.update("UPDATE compliance.work_order SET status = 'EXECUTING', current_node = 'EXECUTION', " +
                     "updated_at = now() WHERE id = :id",
                     new MapSqlParameterSource("id", ticketId));
@@ -409,19 +421,27 @@ public class WorkOrderService {
             SELECT * FROM compliance.disposition_record WHERE ticket_id = :id ORDER BY id
             """, new MapSqlParameterSource("id", ticketId));
 
-        int executed = 0, scheduled = 0, waiting = 0, skipped = 0;
+        int executed = 0, scheduled = 0, waiting = 0, skipped = 0, blocked = 0;
         for (Map<String, Object> d : dispositions) {
             String dStatus = (String) d.get("status");
             if ("EXECUTED".equals(dStatus) || "RECEIPT_RECEIVED".equals(dStatus)
                 || "SCHEDULED".equals(dStatus) || "SKIPPED".equals(dStatus)
-                || "WAITING_RECEIPT".equals(dStatus)) {
-                // 幂等重放：已完成/等待回执的位置直接跳过，备份不会被清两遍、通知不会重发
+                || "WAITING_RECEIPT".equals(dStatus) || "WITHDRAWN".equals(dStatus)) {
+                // 幂等重放：已完成/等待回执/挂起撤回的位置直接跳过，备份不会被清两遍、通知不会重发
+                if ("WITHDRAWN".equals(dStatus)) {
+                    blocked++;
+                }
                 continue;
             }
             String assetCode = (String) d.get("asset_code");
             String category = (String) d.get("category");
             long dispId = ((Number) d.get("id")).longValue();
 
+            // 防御性二次核对：正常情况下预扫描与行锁已保证走不到这里
+            if (holds.isLocationBlocked(subjectHash, assetCode, (String) d.get("location_ref"))) {
+                throw ApiException.conflict("位置 " + assetCode + "/" + d.get("location_ref")
+                    + " 存在有效挂起依据，台账优先：本次删除作业拒绝执行");
+            }
             switch (category) {
                 case "PHYSICAL_DELETE" -> {
                     int deleted = physicalDelete(assetCode, subjectHash);
@@ -544,26 +564,35 @@ public class WorkOrderService {
                         .addValue("id", ticketId));
         audit.log(ticketId, principal.getName(), "DELETE_JOB_EXECUTED",
                   Map.of("executed", executed, "scheduled", scheduled,
-                         "waitingReceipt", waiting, "skipped", skipped, "nextStatus", nextStatus));
+                         "waitingReceipt", waiting, "skipped", skipped,
+                         "blockedByHold", blocked, "nextStatus", nextStatus));
         return Map.of("executed", executed, "scheduled", scheduled,
-                      "waitingReceipt", waiting, "skipped", skipped, "nextStatus", nextStatus);
+                      "waitingReceipt", waiting, "skipped", skipped,
+                      "blockedByHold", blocked, "nextStatus", nextStatus);
     }
 
-    /** 保留期到期后的定时重放入口（幂等：只处理 SCHEDULED 且到期的位置）。 */
+    /** 保留期到期后的定时重放入口（幂等：只处理 SCHEDULED 且到期的位置；挂起位置继续跳过）。 */
     @Transactional
     public Map<String, Object> retryExpiredRetention(long ticketId, Principal principal) {
         Map<String, Object> ticket = requireTicket(ticketId);
+        holds.lockTicketForExecution(ticketId);
         String subjectHash = (String) ticket.get("subjectHash");
         List<Map<String, Object>> due = jdbc.queryForList("""
             SELECT * FROM compliance.disposition_record
              WHERE ticket_id = :id AND status = 'SCHEDULED'
                AND retention_until <= CURRENT_DATE
             """, new MapSqlParameterSource("id", ticketId));
-        int executed = 0;
+        int executed = 0, blocked = 0;
         for (Map<String, Object> d : due) {
             long dispId = ((Number) d.get("id")).longValue();
-            int deleted = physicalDelete((String) d.get("asset_code"), subjectHash);
-            updateExecuted(dispId, deleted, recheckHash((String) d.get("asset_code"), subjectHash), principal);
+            String assetCode = (String) d.get("asset_code");
+            // 保留期到了但挂起依据仍有效：台账优先，不能借重放绕过挂起
+            if (holds.isLocationBlocked(subjectHash, assetCode, (String) d.get("location_ref"))) {
+                blocked++;
+                continue;
+            }
+            int deleted = physicalDelete(assetCode, subjectHash);
+            updateExecuted(dispId, deleted, recheckHash(assetCode, subjectHash), principal);
             executed++;
         }
         boolean stillScheduled = jdbc.queryForObject("""
@@ -581,8 +610,9 @@ public class WorkOrderService {
                             .addValue("n", Boolean.TRUE.equals(waiting) ? "RECEIPT" : "RECONCILE")
                             .addValue("id", ticketId));
         }
-        audit.log(ticketId, principal.getName(), "RETENTION_RETRY", Map.of("executed", executed));
-        return Map.of("executed", executed);
+        audit.log(ticketId, principal.getName(), "RETENTION_RETRY",
+                  Map.of("executed", executed, "blockedByHold", blocked));
+        return Map.of("executed", executed, "blockedByHold", blocked);
     }
 
     // ------------------------------------------------------------------
@@ -780,6 +810,11 @@ public class WorkOrderService {
         String assetCode = (String) sup.get("asset_code");
         Map<String, Object> ticket = requireTicket(originalTicketId);
         String subjectHash = (String) ticket.get("subjectHash");
+        holds.lockTicketForExecution(originalTicketId);
+        if (holds.isAssetBlocked(subjectHash, assetCode)) {
+            throw ApiException.conflict("资产 " + assetCode
+                + " 存在有效挂起依据，增补处置同样被台账拦截，待挂起解除后再执行");
+        }
         int rows = countSubjectRows(assetCode, subjectHash);
         int deleted = rows > 0 ? physicalDelete(assetCode, subjectHash) : 0;
         String idem = originalTicketId + ":" + assetCode + ":SUPPLEMENT";
@@ -834,6 +869,7 @@ public class WorkOrderService {
         manifest.put("supplements", jdbc.queryForList(
             "SELECT * FROM compliance.supplement_ticket WHERE original_ticket_id = :id",
             new MapSqlParameterSource("id", ticketId)));
+        manifest.put("holdLedger", holds.ticketHoldView(ticketId));
 
         try {
             String json = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(manifest);

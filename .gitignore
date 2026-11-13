@@ -6,6 +6,7 @@ target/
 *.iml
 evidence/
 node_modules/
+.npm-cache/
 dist/
 .vite/
 .DS_Store

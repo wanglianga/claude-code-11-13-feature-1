@@ -5,6 +5,7 @@
       <el-menu :default-active="$route.path" router background-color="#1f2d3d" text-color="#c0ccda" active-text-color="#409eff">
         <el-menu-item index="/subjects"><el-icon><User /></el-icon><span>主体归并确认</span></el-menu-item>
         <el-menu-item index="/tickets"><el-icon><Tickets /></el-icon><span>注销工单</span></el-menu-item>
+        <el-menu-item index="/holds"><el-icon><Lock /></el-icon><span>挂起仲裁</span></el-menu-item>
         <el-menu-item index="/lineage"><el-icon><Share /></el-icon><span>资产与血缘</span></el-menu-item>
       </el-menu>
       <div class="aside-footer">

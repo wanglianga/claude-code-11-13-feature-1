@@ -8,5 +8,8 @@ spring:
 
 app:
   cancel-window-minutes: 0
+  hold:
+    review-lead-days: 3
+    legal-limit-days: 180
   evidence:
     dir: target/test-evidence

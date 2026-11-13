@@ -73,7 +73,8 @@ const statuses = [
   { value: 'RECONCILIATION', label: '对账中' },
   { value: 'COMPLETED', label: '已完成' },
   { value: 'CANCELLED', label: '已撤回' },
-  { value: 'RETURNED', label: '已退回' }
+  { value: 'RETURNED', label: '已退回' },
+  { value: 'HELD', label: '挂起仲裁中' }
 ]
 const createForm = reactive({ subjectHash: '', channel: 'REGULATOR_LETTER', sourceRef: '' })
 const confirmedSubjects = ref([])
@@ -107,7 +108,7 @@ function ticketStatusLabel(s) {
   return Object.fromEntries(statuses.map((x) => [x.value, x.label]))[s] || s
 }
 function ticketStatusType(s) {
-  return { COMPLETED: 'success', CANCELLED: 'info', RETURNED: 'warning', WAITING_RECEIPT: 'primary', RECONCILIATION: 'warning', PENDING_EXECUTION: 'danger' }[s] || ''
+  return { COMPLETED: 'success', CANCELLED: 'info', RETURNED: 'warning', WAITING_RECEIPT: 'primary', RECONCILIATION: 'warning', PENDING_EXECUTION: 'danger', HELD: 'danger' }[s] || ''
 }
 function nodeLabel(n) {
   return { ENUMERATION: '枚举', PREVIEW: '预览', EXECUTION: '执行', RECEIPT: '回执', RECONCILE: '对账', DONE: '完成' }[n] || n

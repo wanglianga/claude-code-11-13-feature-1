@@ -5,6 +5,20 @@
       <el-button @click="$router.back()">返回列表</el-button>
     </div>
 
+    <el-alert v-if="ticket?.status === 'HELD'" type="error" :closable="false" class="section-card"
+      title="工单处于挂起仲裁（HELD）：台账优先，删除作业被拦截；挂起解除后须重新触发影响面预览，不能一边挂起一边删。"
+      show-icon>
+      <template #default>
+        <div style="margin-top:6px">
+          生效挂起位置：
+          <el-tag v-for="e in activeHolds" :key="e.id" type="danger" size="small" style="margin-right:6px">
+            {{ e.asset_code }} / {{ e.location_ref }}（{{ e.doc_no }} v{{ e.doc_version_no }}，到期 {{ e.hold_expires_at }}）
+          </el-tag>
+          <span v-if="!activeHolds.length">无（可能刚解除，请刷新）</span>
+        </div>
+      </template>
+    </el-alert>
+
     <el-card v-if="ticket" class="section-card">
       <el-descriptions :column="4" border size="small">
         <el-descriptions-item label="状态">
@@ -195,6 +209,78 @@
         </el-table>
       </el-tab-pane>
 
+      <el-tab-pane label="挂起仲裁（台账/撤回/冲突/复核）">
+        <el-alert type="info" :closable="false" style="margin-bottom:10px"
+          title="挂起以位置为粒度登记；文书版本冻结、延期另出新版；撤回的清除作业逐条留痕，恢复执行时重新触发影响面预览。" />
+        <h4 style="margin:6px 0">位置粒度挂起台账</h4>
+        <el-table :data="ticket.holdView?.entries || []" border size="small" style="margin-bottom:14px">
+          <el-table-column prop="id" label="ID" width="70" />
+          <el-table-column prop="doc_no" label="文书编号" width="170" show-overflow-tooltip />
+          <el-table-column prop="doc_version_no" label="版本" width="70" />
+          <el-table-column prop="asset_code" label="资产" width="140" />
+          <el-table-column prop="location_ref" label="存储位置" width="220" show-overflow-tooltip />
+          <el-table-column prop="owner_person" label="责任人" width="100" />
+          <el-table-column prop="hold_effective_at" label="生效时点" width="180" />
+          <el-table-column prop="hold_expires_at" label="到期日" width="180" />
+          <el-table-column label="状态" width="100">
+            <template #default="{ row }">
+              <el-tag :type="row.status === 'ACTIVE' ? 'danger' : row.status === 'ESCALATED' ? 'warning' : 'success'">
+                {{ holdEntryLabel(row.status) }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="release_reason" label="恢复/关闭原因" min-width="180" show-overflow-tooltip />
+        </el-table>
+
+        <h4 style="margin:6px 0">清除作业撤回留痕</h4>
+        <el-table :data="ticket.holdView?.withdrawals || []" border size="small" style="margin-bottom:14px">
+          <el-table-column prop="id" label="ID" width="70" />
+          <el-table-column prop="asset_code" label="资产" width="140" />
+          <el-table-column prop="location_ref" label="位置" width="220" show-overflow-tooltip />
+          <el-table-column prop="previous_status" label="撤回前状态" width="120" />
+          <el-table-column prop="withdrawn_by" label="撤回人" width="110" />
+          <el-table-column prop="reason" label="撤回原因" min-width="220" show-overflow-tooltip />
+          <el-table-column prop="withdrawn_at" label="撤回时间" width="190" />
+        </el-table>
+
+        <h4 style="margin:6px 0">同日冲突与裁定</h4>
+        <el-table :data="ticket.holdView?.conflicts || []" border size="small" style="margin-bottom:14px">
+          <el-table-column prop="id" label="ID" width="70" />
+          <el-table-column prop="hold_doc_no" label="挂起依据" width="200" />
+          <el-table-column prop="release_doc_no" label="撤销依据" width="200" />
+          <el-table-column label="状态" width="120">
+            <template #default="{ row }">
+              <el-tag :type="row.status === 'PENDING' ? 'danger' : 'success'">
+                {{ row.status === 'PENDING' ? '待裁定' : row.ruling }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="ruling_reason" label="裁定理由" min-width="200" show-overflow-tooltip />
+        </el-table>
+
+        <h4 style="margin:6px 0">挂起合规问题</h4>
+        <el-table :data="ticket.holdView?.issues || []" border size="small" style="margin-bottom:14px">
+          <el-table-column prop="issue_type" label="类型" width="220" />
+          <el-table-column prop="detail" label="说明" min-width="260" show-overflow-tooltip />
+          <el-table-column label="状态" width="100">
+            <template #default="{ row }">
+              <el-tag :type="row.status === 'OPEN' ? 'danger' : 'success'">
+                {{ row.status === 'OPEN' ? '待复核' : '已解决' }}
+              </el-tag>
+            </template>
+          </el-table-column>
+        </el-table>
+
+        <h4 style="margin:6px 0">挂起事件流（不可变，可复现任意时点状态）</h4>
+        <el-timeline>
+          <el-timeline-item v-for="e in ticket.holdView?.events || []" :key="e.id" :timestamp="e.event_at" placement="top">
+            <strong>{{ e.event_type }}</strong>
+            <el-tag size="small" style="margin-left:6px">{{ e.actor }}</el-tag>
+            <pre class="mono" style="margin:4px 0 0; white-space:pre-wrap">{{ JSON.stringify(e.detail_json, null, 2) }}</pre>
+          </el-timeline-item>
+        </el-timeline>
+      </el-tab-pane>
+
       <el-tab-pane label="审计时间线">
         <el-timeline>
           <el-timeline-item v-for="log in ticket.auditLogs" :key="log.id" :timestamp="log.created_at" placement="top">
@@ -230,6 +316,8 @@ const canExecute = computed(() => ticket.value && ['PENDING_EXECUTION', 'RETURNE
 const canCancel = computed(() => ticket.value && ['PENDING_EXECUTION', 'RETURNED'].includes(ticket.value.status))
 const canReturn = computed(() => ticket.value && !['COMPLETED', 'CANCELLED'].includes(ticket.value.status))
 const canReconcile = computed(() => ticket.value && ['RECONCILIATION', 'RETURNED'].includes(ticket.value.status))
+const activeHolds = computed(() =>
+  (ticket.value?.holdView?.entries || []).filter((e) => ['ACTIVE', 'ESCALATED'].includes(e.status)))
 
 async function load() {
   loading.value = true
@@ -313,10 +401,13 @@ async function buildEvidence() {
   await load()
 }
 function statusLabel(s) {
-  return { CREATED: '待枚举', ENUM_FROZEN: '枚举已冻结', PENDING_EXECUTION: '待执行(可撤回)', EXECUTING: '执行中', WAITING_RECEIPT: '等待回执', RECONCILIATION: '对账中', COMPLETED: '已完成', CANCELLED: '已撤回', RETURNED: '已退回' }[s] || s
+  return { CREATED: '待枚举', ENUM_FROZEN: '枚举已冻结', PENDING_EXECUTION: '待执行(可撤回)', EXECUTING: '执行中', WAITING_RECEIPT: '等待回执', RECONCILIATION: '对账中', COMPLETED: '已完成', CANCELLED: '已撤回', RETURNED: '已退回', HELD: '挂起仲裁中' }[s] || s
 }
 function statusType(s) {
-  return { COMPLETED: 'success', CANCELLED: 'info', RETURNED: 'warning', WAITING_RECEIPT: 'primary', RECONCILIATION: 'warning', PENDING_EXECUTION: 'danger' }[s] || ''
+  return { COMPLETED: 'success', CANCELLED: 'info', RETURNED: 'warning', WAITING_RECEIPT: 'primary', RECONCILIATION: 'warning', PENDING_EXECUTION: 'danger', HELD: 'danger' }[s] || ''
+}
+function holdEntryLabel(s) {
+  return { ACTIVE: '生效中', RELEASED: '已恢复/关闭', EXPIRED: '已到期', ESCALATED: '已升级' }[s] || s
 }
 function nodeLabel(n) {
   return { ENUMERATION: '枚举', PREVIEW: '预览', EXECUTION: '执行', RECEIPT: '回执', RECONCILE: '对账', DONE: '完成' }[n] || n
@@ -328,10 +419,10 @@ function dispType(v) {
   return { PHYSICAL_DELETE: 'danger', RECOMPUTE_AGGREGATE: 'warning', WAIT_RETENTION: 'info', EXTERNAL_NOTIFY: 'primary' }[v] || ''
 }
 function dispStatusLabel(s) {
-  return { PENDING: '待处理', PREVIEWED: '已预览', SCHEDULED: '已排期(等保留期)', EXECUTED: '已执行', FAILED: '失败', WAITING_RECEIPT: '等待回执', RECEIPT_RECEIVED: '回执已到', SKIPPED: '无需处置' }[s] || s
+  return { PENDING: '待处理', PREVIEWED: '已预览', SCHEDULED: '已排期(等保留期)', EXECUTED: '已执行', FAILED: '失败', WAITING_RECEIPT: '等待回执', RECEIPT_RECEIVED: '回执已到', SKIPPED: '无需处置', WITHDRAWN: '挂起撤回' }[s] || s
 }
 function dispStatusType(s) {
-  return { EXECUTED: 'success', RECEIPT_RECEIVED: 'success', SCHEDULED: 'warning', WAITING_RECEIPT: 'primary', FAILED: 'danger', SKIPPED: 'info' }[s] || ''
+  return { EXECUTED: 'success', RECEIPT_RECEIVED: 'success', SCHEDULED: 'warning', WAITING_RECEIPT: 'primary', FAILED: 'danger', SKIPPED: 'info', WITHDRAWN: 'danger' }[s] || ''
 }
 function itemStatusLabel(s) {
   return { IN_SCOPE: '纳入范围', PENDING_HUMAN: '待人工确认', OUT_OF_SCOPE: '排除' }[s] || s

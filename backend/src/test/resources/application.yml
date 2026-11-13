@@ -1,0 +1,12 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://127.0.0.1:5432/rtbf_test
+    username: ccdev
+    password: ccdev
+  flyway:
+    clean-disabled: false
+
+app:
+  cancel-window-minutes: 0
+  evidence:
+    dir: target/test-evidence

@@ -1,0 +1,46 @@
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: rtbf-postgres
+    environment:
+      POSTGRES_DB: rtbf
+      POSTGRES_USER: ccdev
+      POSTGRES_PASSWORD: ccdev
+    ports:
+      - "5432:5432"
+    volumes:
+      - rtbf-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ccdev -d rtbf"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  backend:
+    build: ./backend
+    container_name: rtbf-backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_URL: jdbc:postgresql://postgres:5432/rtbf
+      DB_USERNAME: ccdev
+      DB_PASSWORD: ccdev
+      CANCEL_WINDOW_MINUTES: 30
+      EVIDENCE_DIR: /app/evidence
+    ports:
+      - "8080:8080"
+    volumes:
+      - rtbf-evidence:/app/evidence
+
+  frontend:
+    build: ./frontend
+    container_name: rtbf-frontend
+    depends_on:
+      - backend
+    ports:
+      - "8088:80"
+
+volumes:
+  rtbf-pgdata:
+  rtbf-evidence:
